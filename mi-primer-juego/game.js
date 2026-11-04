@@ -1,6 +1,9 @@
 // ============================================================================
-// PIXEL DRUMS: GUITAR HERO 3D EDITION (Phaser 3)
+// PIXEL DRUMS: GUITAR HERO 3D EDITION + MODO 1 VS 1 ONLINE P2P
 // ============================================================================
+// - Modo 1 vs 1 Multijugador en tiempo real por WebRTC (PeerJS, sin backend)
+// - Sistema de Salas con Códigos únicos (Host genera código, Rival se une)
+// - Cara a cara (Face-Off) con barra de balance de duelo y HUD de rival en vivo
 // - Estética clásica Guitar Hero en perspectiva Pseudo-3D Pixel Art
 // - Pantalla completa responsiva (Full viewport)
 // - Controles: Q (Verde), W (Rojo), E (Amarillo), R (Azul)
@@ -22,7 +25,6 @@ const LANE_COLORS = [0x00e676, 0xff1744, 0xffea00, 0x2979ff]; // Verde, Rojo, Am
 const LANE_HEX = ['#00e676', '#ff1744', '#ffea00', '#2979ff'];
 const LANE_NAMES = ['Hi-Hat (Q)', 'Snare (W)', 'Tom (E)', 'Kick (R)'];
 
-// Guardado persistente
 const STORAGE_KEY = 'pixel_drums_save_v2';
 function loadSaveData() {
     const def = {
@@ -59,10 +61,231 @@ function saveUserData() {
 
 let playerData = loadSaveData();
 
-// Estado temporal para audio subido
 let customAudioData = {
     buffer: null,
     name: null
+};
+
+// ----------------------------------------------------------------------------
+// GESTOR MULTIJUGADOR 1 VS 1 P2P (PeerJS / WebRTC)
+// ----------------------------------------------------------------------------
+class MultiplayerManager {
+    static init() {
+        this.peer = null;
+        this.conn = null;
+        this.isHost = false;
+        this.roomCode = null;
+        this.isConnected = false;
+        this.currentScene = null;
+        this.rivalStats = {
+            score: 0,
+            combo: 0,
+            multiplier: 1,
+            rockMeter: 0.65,
+            hits: 0,
+            misses: 0,
+            lastHit: '',
+            finalScore: 0,
+            accuracy: 0
+        };
+    }
+
+    static openLobby(scene) {
+        this.currentScene = scene;
+        const modal = document.getElementById('lobby-modal');
+        if (modal) {
+            modal.style.display = 'flex';
+            this.startHostMode();
+        }
+    }
+
+    static closeLobby() {
+        const modal = document.getElementById('lobby-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    static startHostMode() {
+        this.isHost = true;
+        this.cleanup();
+
+        // Generar código de sala de 4 dígitos (Ej: ROCK-7429)
+        const randNum = Math.floor(1000 + Math.random() * 9000);
+        this.roomCode = `ROCK-${randNum}`;
+
+        const codeDisplay = document.getElementById('my-room-code');
+        const statusDisplay = document.getElementById('host-status');
+        if (codeDisplay) codeDisplay.innerText = this.roomCode;
+        if (statusDisplay) statusDisplay.innerText = 'Creando sala en la red...';
+
+        try {
+            // Inicializar PeerJS con ID público basado en el código
+            const peerId = `pixeldrums-gh-${this.roomCode.toLowerCase()}`;
+            this.peer = new Peer(peerId);
+
+            this.peer.on('open', (id) => {
+                if (statusDisplay) statusDisplay.innerText = 'Esperando a que el rival introduzca el código...';
+            });
+
+            this.peer.on('connection', (connection) => {
+                this.conn = connection;
+                this.setupConnectionHandlers();
+                if (statusDisplay) statusDisplay.innerText = '¡Rival detectado! Conectando duelo...';
+            });
+
+            this.peer.on('error', (err) => {
+                console.error('Peer error:', err);
+                if (statusDisplay) statusDisplay.innerText = 'Error al crear sala. Intenta de nuevo.';
+            });
+        } catch (e) {
+            console.error('PeerJS init failed:', e);
+            if (statusDisplay) statusDisplay.innerText = 'Error cargando PeerJS. Revisa tu conexión.';
+        }
+    }
+
+    static joinRoom(code) {
+        this.isHost = false;
+        this.cleanup();
+
+        const cleanCode = code.trim().toUpperCase();
+        this.roomCode = cleanCode;
+        const statusDisplay = document.getElementById('join-status');
+        if (statusDisplay) statusDisplay.innerText = `Conectando a la sala ${cleanCode}...`;
+
+        try {
+            this.peer = new Peer();
+
+            this.peer.on('open', () => {
+                const hostPeerId = `pixeldrums-gh-${cleanCode.toLowerCase()}`;
+                this.conn = this.peer.connect(hostPeerId, { reliable: true });
+                this.setupConnectionHandlers();
+            });
+
+            this.peer.on('error', (err) => {
+                console.error('Peer join error:', err);
+                if (statusDisplay) statusDisplay.innerText = 'Código no encontrado o sala inactiva.';
+            });
+        } catch (e) {
+            console.error('Join failed:', e);
+            if (statusDisplay) statusDisplay.innerText = 'Error de conexión P2P.';
+        }
+    }
+
+    static setupConnectionHandlers() {
+        if (!this.conn) return;
+
+        this.conn.on('open', () => {
+            this.isConnected = true;
+            const statusDisplay = this.isHost ? document.getElementById('host-status') : document.getElementById('join-status');
+            if (statusDisplay) statusDisplay.innerText = '¡CONECTADO! INICIANDO DUELO...';
+
+            SoundSynth.playCheer();
+
+            if (this.isHost) {
+                // El anfitrión envía la configuración del nivel y arranca
+                setTimeout(() => {
+                    const levelToPlay = playerData.currentLevel;
+                    this.send({ type: 'start_match', level: levelToPlay });
+                    this.launchGame(levelToPlay);
+                }, 1200);
+            }
+        });
+
+        this.conn.on('data', (data) => {
+            if (data.type === 'start_match') {
+                this.launchGame(data.level);
+            } else if (data.type === 'stats') {
+                Object.assign(this.rivalStats, data.stats);
+            } else if (data.type === 'game_over') {
+                this.rivalStats.finalScore = data.finalScore;
+                this.rivalStats.accuracy = data.accuracy;
+            } else if (data.type === 'rematch_req') {
+                if (this.currentScene) {
+                    this.currentScene.scene.start('GameScene', { mode: '1v1', isHost: this.isHost, level: playerData.currentLevel });
+                }
+            }
+        });
+
+        this.conn.on('close', () => {
+            this.isConnected = false;
+        });
+    }
+
+    static send(data) {
+        if (this.conn && this.conn.open) {
+            try {
+                this.conn.send(data);
+            } catch (e) {
+                console.warn('Send error:', e);
+            }
+        }
+    }
+
+    static sendStats(stats) {
+        this.send({ type: 'stats', stats });
+    }
+
+    static launchGame(level) {
+        this.closeLobby();
+        if (this.currentScene) {
+            this.currentScene.scene.start('GameScene', { mode: '1v1', isHost: this.isHost, level: level });
+        }
+    }
+
+    static cleanup() {
+        if (this.conn) {
+            try { this.conn.close(); } catch (e) {}
+            this.conn = null;
+        }
+        if (this.peer) {
+            try { this.peer.destroy(); } catch (e) {}
+            this.peer = null;
+        }
+        this.isConnected = false;
+    }
+}
+MultiplayerManager.init();
+
+// Funciones globales vinculadas al HTML Modal de la sala
+window.switchLobbyTab = function(tab) {
+    const tabHost = document.getElementById('tab-host');
+    const tabJoin = document.getElementById('tab-join');
+    const btnHost = document.getElementById('tab-host-btn');
+    const btnJoin = document.getElementById('tab-join-btn');
+
+    if (tab === 'host') {
+        tabHost.classList.add('active');
+        tabJoin.classList.remove('active');
+        btnHost.classList.add('active');
+        btnJoin.classList.remove('active');
+        MultiplayerManager.startHostMode();
+    } else {
+        tabJoin.classList.add('active');
+        tabHost.classList.remove('active');
+        btnJoin.classList.add('active');
+        btnHost.classList.remove('active');
+    }
+};
+
+window.copyRoomCode = function() {
+    if (MultiplayerManager.roomCode) {
+        navigator.clipboard.writeText(MultiplayerManager.roomCode);
+        const status = document.getElementById('host-status');
+        if (status) status.innerText = '¡Código copiado al portapapeles!';
+    }
+};
+
+window.joinRoomFromInput = function() {
+    const input = document.getElementById('join-room-input');
+    if (input && input.value.trim().length > 0) {
+        MultiplayerManager.joinRoom(input.value.trim());
+    } else {
+        alert('Por favor ingresa un código de sala válido.');
+    }
+};
+
+window.closeLobbyModal = function() {
+    MultiplayerManager.closeLobby();
+    MultiplayerManager.cleanup();
 };
 
 // ----------------------------------------------------------------------------
@@ -79,7 +302,6 @@ class SoundSynth {
         }
     }
 
-    // Hi-Hat metálico (Q)
     static playHiHat() {
         SoundSynth.init();
         const ctx = SoundSynth.ctx;
@@ -104,12 +326,10 @@ class SoundSynth {
         noise.start(now);
     }
 
-    // Snare / Tarola crujiente (W)
     static playSnare() {
         SoundSynth.init();
         const ctx = SoundSynth.ctx;
         const now = ctx.currentTime;
-        // Ruido blanco
         const bufferSize = ctx.sampleRate * 0.12;
         const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
         const data = buffer.getChannelData(0);
@@ -129,7 +349,6 @@ class SoundSynth {
         noiseGain.connect(ctx.destination);
         noise.start(now);
 
-        // Tono grave del parche
         const osc = ctx.createOscillator();
         const oscGain = ctx.createGain();
         osc.frequency.setValueAtTime(190, now);
@@ -142,7 +361,6 @@ class SoundSynth {
         osc.stop(now + 0.1);
     }
 
-    // Tom resonante (E)
     static playTom() {
         SoundSynth.init();
         const ctx = SoundSynth.ctx;
@@ -160,7 +378,6 @@ class SoundSynth {
         osc.stop(now + 0.18);
     }
 
-    // Kick / Bombo potente (R)
     static playKick() {
         SoundSynth.init();
         const ctx = SoundSynth.ctx;
@@ -185,7 +402,6 @@ class SoundSynth {
         else if (lane === 3) SoundSynth.playKick();
     }
 
-    // Zumbido eléctrico para notas sostenidas
     static playSustainTone(lane) {
         SoundSynth.init();
         const ctx = SoundSynth.ctx;
@@ -203,7 +419,6 @@ class SoundSynth {
         osc.stop(now + 0.08);
     }
 
-    // Sonido de fallo
     static playMiss() {
         SoundSynth.init();
         const ctx = SoundSynth.ctx;
@@ -221,7 +436,6 @@ class SoundSynth {
         osc.stop(now + 0.12);
     }
 
-    // Sonido de ovación del público
     static playCheer() {
         SoundSynth.init();
         const ctx = SoundSynth.ctx;
@@ -250,32 +464,25 @@ class SoundSynth {
 // GENERADOR DE TEXTURAS PIXEL ART
 // ----------------------------------------------------------------------------
 class PixelFactory {
-    // Nota 3D tipo gema de Guitar Hero (beveled oval pixel art)
     static createNoteTexture(scene, key, color, hasRing = false) {
         const g = scene.make.graphics({ add: false });
         const w = 48, h = 32;
 
-        // Sombra oscura inferior
         g.fillStyle(0x000000, 0.7);
         g.fillEllipse(w / 2, h / 2 + 5, 42, 22);
 
-        // Borde exterior biselado
         g.fillStyle(0x1a1a1a);
         g.fillEllipse(w / 2, h / 2, 42, 24);
 
-        // Borde metálico
         g.fillStyle(0x777777);
         g.fillEllipse(w / 2, h / 2 - 2, 38, 20);
 
-        // Cuerpo coloreado de la gema
         g.fillStyle(color);
         g.fillEllipse(w / 2, h / 2 - 3, 34, 16);
 
-        // Brillo superior 3D (reflejo blanco/claro)
         g.fillStyle(0xffffff, 0.7);
         g.fillEllipse(w / 2 - 4, h / 2 - 6, 16, 6);
 
-        // Detalle de núcleo
         if (hasRing) {
             g.fillStyle(0xffffff, 0.9);
             g.fillCircle(w / 2, h / 2 - 3, 3);
@@ -285,28 +492,22 @@ class PixelFactory {
         g.destroy();
     }
 
-    // Receptor / Pulsador de la zona de acierto
     static createReceptorTexture(scene, key, color) {
         const g = scene.make.graphics({ add: false });
         const w = 56, h = 36;
 
-        // Base oscura
         g.fillStyle(0x0a0a0a);
         g.fillEllipse(w / 2, h / 2, 54, 32);
 
-        // Anillo de metal exterior
         g.lineStyle(3, 0xaaaaaa, 1);
         g.strokeEllipse(w / 2, h / 2, 50, 28);
 
-        // Anillo de color neón
         g.lineStyle(2, color, 0.8);
         g.strokeEllipse(w / 2, h / 2, 42, 22);
 
-        // Centro oscurecido
         g.fillStyle(0x151515);
         g.fillEllipse(w / 2, h / 2, 34, 16);
 
-        // Punto de referencia central
         g.fillStyle(color, 0.5);
         g.fillCircle(w / 2, h / 2, 4);
 
@@ -314,11 +515,9 @@ class PixelFactory {
         g.destroy();
     }
 
-    // Efecto de chispa / llama al golpear la nota
     static createSparksTexture(scene, key) {
         const g = scene.make.graphics({ add: false });
         g.fillStyle(0xffffff);
-        // Cruz pixel art
         g.fillRect(10, 2, 4, 20);
         g.fillRect(2, 10, 20, 4);
         g.fillRect(6, 6, 12, 12);
@@ -326,12 +525,10 @@ class PixelFactory {
         g.destroy();
     }
 
-    // Baterista pixel art animable
     static createDrummerTexture(scene, key, outfitCol, skinCol, drumCol, stickCol) {
         const g = scene.make.graphics({ add: false });
         const w = 120, h = 100;
 
-        // Platillos Crash & Ride
         g.fillStyle(0xffcc00);
         g.fillEllipse(18, 30, 30, 8);
         g.fillEllipse(102, 30, 30, 8);
@@ -339,19 +536,16 @@ class PixelFactory {
         g.fillRect(17, 34, 3, 25);
         g.fillRect(101, 34, 3, 25);
 
-        // Bombo gigante central
         g.fillStyle(drumCol);
         g.fillCircle(60, 70, 26);
         g.fillStyle(0x222222);
         g.fillCircle(60, 70, 24);
         g.fillStyle(0xeeeeee);
         g.fillCircle(60, 70, 20);
-        // Logo en el bombo
         g.fillStyle(0xff1744);
         g.fillRect(52, 66, 16, 4);
         g.fillRect(58, 62, 4, 14);
 
-        // Toms
         g.fillStyle(drumCol);
         g.fillRect(28, 48, 20, 16);
         g.fillRect(72, 48, 20, 16);
@@ -359,29 +553,23 @@ class PixelFactory {
         g.fillRect(30, 46, 16, 4);
         g.fillRect(74, 46, 16, 4);
 
-        // Tarola (Snare)
         g.fillStyle(0xbbbbbb);
         g.fillRect(14, 58, 18, 12);
         g.fillStyle(0xffffff);
         g.fillRect(16, 56, 14, 3);
 
-        // Cuerpo y ropa del baterista
         g.fillStyle(outfitCol);
         g.fillRect(52, 28, 16, 20);
 
-        // Cabeza & Pelo Rocker
         g.fillStyle(skinCol);
         g.fillRect(54, 12, 12, 14);
-        // Pelo negro largo
         g.fillStyle(0x111111);
         g.fillRect(52, 8, 16, 7);
         g.fillRect(50, 12, 4, 16);
         g.fillRect(66, 12, 4, 16);
-        // Gafas de sol oscuras
         g.fillStyle(0x000000);
         g.fillRect(54, 16, 12, 3);
 
-        // Brazos y baquetas
         g.fillStyle(skinCol);
         g.fillRect(44, 30, 8, 4);
         g.fillRect(68, 30, 8, 4);
@@ -394,22 +582,18 @@ class PixelFactory {
         g.destroy();
     }
 
-    // Amplificador Marshall pixel art (para los lados del escenario)
     static createAmpTexture(scene, key) {
         const g = scene.make.graphics({ add: false });
         const w = 70, h = 130;
 
-        // Gabinete negro con bordes metálicos
         g.fillStyle(0x111111);
         g.fillRect(0, 0, w, h);
         g.lineStyle(2, 0xd4af37, 1);
         g.strokeRect(1, 1, w - 2, h - 2);
 
-        // Rejilla de bocinas
         g.fillStyle(0x282828);
         g.fillRect(6, 26, w - 12, h - 34);
 
-        // Dos conos de altavoces
         g.fillStyle(0x181818);
         g.fillCircle(w / 2, 50, 18);
         g.fillCircle(w / 2, 92, 18);
@@ -417,10 +601,8 @@ class PixelFactory {
         g.fillCircle(w / 2, 50, 5);
         g.fillCircle(w / 2, 92, 5);
 
-        // Panel de control superior dorado
         g.fillStyle(0xd4af37);
         g.fillRect(6, 6, w - 12, 14);
-        // Perillas
         g.fillStyle(0x000000);
         for (let i = 0; i < 5; i++) {
             g.fillCircle(14 + i * 10, 13, 2);
@@ -440,7 +622,7 @@ class AudioAnalyzer {
         const sampleRate = audioBuffer.sampleRate;
         const duration = audioBuffer.duration;
 
-        const windowSize = Math.floor(sampleRate * 0.04); // 40ms
+        const windowSize = Math.floor(sampleRate * 0.04);
         const hopSize = Math.floor(windowSize / 2);
         const energies = [];
 
@@ -472,10 +654,7 @@ class AudioAnalyzer {
             const time = energies[i].time;
 
             if (curr > localAvg * threshold && (time - lastTime) > minGap) {
-                // Detectar carril por espectro
                 const lane = AudioAnalyzer._getLane(channelData, Math.floor(time * sampleRate), windowSize, sampleRate);
-                
-                // Detectar si la energía se mantiene para convertirla en nota sostenida (Hold Note)
                 let sustainDur = 0;
                 let lookAhead = i + 1;
                 while (lookAhead < energies.length && lookAhead < i + 25 && energies[lookAhead].energy > localAvg * 1.1) {
@@ -491,7 +670,7 @@ class AudioAnalyzer {
                     lane: lane,
                     duration: sustainDur
                 });
-                lastTime = time + sustainDur; // Evitar superposición inmediata
+                lastTime = time + sustainDur;
             }
         }
 
@@ -525,32 +704,27 @@ class AudioAnalyzer {
         return maxB;
     }
 
-    // Generador de partituras para los niveles integrados (con notas normales y sostenidas)
     static generateLevelSong(level) {
         const duration = 35 + (level - 1) * 8;
         const bpm = 110 + (level - 1) * 15;
         const beatStep = 60 / bpm;
         const notes = [];
 
-        let t = 2.0; // Iniciar tras 2s
+        let t = 2.0;
         let stepCount = 0;
 
         while (t < duration - 2.0) {
             stepCount++;
             const beatInBar = stepCount % 16;
-            
-            // Patrones rítmicos variados según nivel
             let spawnLanes = [];
             let isSustain = false;
             let sustainDur = 0;
 
             if (level === 1) {
-                // Nivel 1: Ritmo clásico Rock 4/4
-                if (beatInBar % 4 === 0) spawnLanes = [3]; // Kick
-                else if (beatInBar % 4 === 2) spawnLanes = [1]; // Snare
-                if (beatInBar % 2 === 0) spawnLanes.push(0); // Hi-hat
+                if (beatInBar % 4 === 0) spawnLanes = [3];
+                else if (beatInBar % 4 === 2) spawnLanes = [1];
+                if (beatInBar % 2 === 0) spawnLanes.push(0);
             } else if (level === 2) {
-                // Nivel 2: Introduce Notas Sostenidas
                 if (beatInBar === 0 || beatInBar === 8) {
                     spawnLanes = [3];
                     isSustain = true;
@@ -561,7 +735,6 @@ class AudioAnalyzer {
                     spawnLanes = [beatInBar % 4 === 1 ? 0 : 2];
                 }
             } else if (level === 3) {
-                // Nivel 3: Ritmo sincopado (la línea de acierto se moverá)
                 if (beatInBar % 4 === 0) spawnLanes = [3];
                 if (beatInBar % 4 === 2) spawnLanes = [1];
                 if (beatInBar % 3 === 0) spawnLanes.push(2);
@@ -571,7 +744,6 @@ class AudioAnalyzer {
                     sustainDur = beatStep * 2;
                 }
             } else if (level === 4) {
-                // Nivel 4: Metal frenético (el tablero rotará)
                 spawnLanes = [stepCount % 4];
                 if (stepCount % 2 === 0) spawnLanes.push(3);
                 if (beatInBar === 0 || beatInBar === 8) {
@@ -579,7 +751,6 @@ class AudioAnalyzer {
                     sustainDur = beatStep * 1.8;
                 }
             } else {
-                // Nivel 5: Guitar God (Solos, polirritmia, sostenidas, rotaciones y línea móvil)
                 spawnLanes = [stepCount % 4];
                 if (stepCount % 3 === 0) spawnLanes.push((stepCount + 2) % 4);
                 if (beatInBar === 0 || beatInBar === 6 || beatInBar === 12) {
@@ -610,7 +781,6 @@ class BootScene extends Phaser.Scene {
     constructor() { super('BootScene'); }
 
     create() {
-        // Generar texturas de notas para cada carril
         for (let i = 0; i < LANE_COUNT; i++) {
             PixelFactory.createNoteTexture(this, `note-gem-${i}`, LANE_COLORS[i], true);
             PixelFactory.createReceptorTexture(this, `receptor-${i}`, LANE_COLORS[i]);
@@ -628,7 +798,7 @@ class BootScene extends Phaser.Scene {
 }
 
 // ----------------------------------------------------------------------------
-// ESCENA: MENÚ PRINCIPAL (ESTILO GUITAR HERO CLÁSICO)
+// ESCENA: MENÚ PRINCIPAL
 // ----------------------------------------------------------------------------
 class MenuScene extends Phaser.Scene {
     constructor() { super('MenuScene'); }
@@ -639,21 +809,18 @@ class MenuScene extends Phaser.Scene {
 
         SoundSynth.init();
 
-        // Fondo de concierto pixel art con focos dinámicos
         this.bgGraphics = this.add.graphics();
         this._drawMenuBackground(w, h);
 
-        // Luces de concierto animadas
         this.spotlights = [];
         for (let i = 0; i < 4; i++) {
             const spot = this.add.graphics();
             this.spotlights.push({ g: spot, baseAngle: i * 0.8, color: LANE_COLORS[i] });
         }
 
-        // Título clásico estilo Guitar Hero
-        const titleY = Math.max(50, h * 0.12);
-        const titleText = this.add.text(w / 2, titleY, 'PIXEL HERO', {
-            fontSize: `${Math.min(w * 0.08, 64)}px`,
+        const titleY = Math.max(45, h * 0.10);
+        this.add.text(w / 2, titleY, 'PIXEL HERO', {
+            fontSize: `${Math.min(w * 0.08, 62)}px`,
             fontFamily: 'Impact, "Trebuchet MS", sans-serif',
             fontStyle: 'bold',
             color: '#ffea00',
@@ -662,8 +829,8 @@ class MenuScene extends Phaser.Scene {
             shadow: { offsetX: 4, offsetY: 4, color: '#ff1744', blur: 0, fill: true }
         }).setOrigin(0.5);
 
-        this.add.text(w / 2, titleY + 45, '★ 8-BIT DRUM HIGHWAY ★', {
-            fontSize: `${Math.min(w * 0.025, 18)}px`,
+        this.add.text(w / 2, titleY + 42, '★ 8-BIT DRUM HIGHWAY ★', {
+            fontSize: `${Math.min(w * 0.024, 17)}px`,
             fontFamily: 'Courier New, monospace',
             fontStyle: 'bold',
             color: '#00e676',
@@ -671,8 +838,7 @@ class MenuScene extends Phaser.Scene {
             strokeThickness: 4
         }).setOrigin(0.5);
 
-        // Baterista animado al centro
-        this.drummer = this.add.image(w / 2, h * 0.38, 'drummer-base').setScale(Math.min(w, h) / 450);
+        this.drummer = this.add.image(w / 2, h * 0.33, 'drummer-base').setScale(Math.min(w, h) / 480);
         this.tweens.add({
             targets: this.drummer,
             y: this.drummer.y - 8,
@@ -682,72 +848,68 @@ class MenuScene extends Phaser.Scene {
             ease: 'Sine.easeInOut'
         });
 
-        // Amplificadores a los costados
-        const ampScale = Math.min(w, h) / 600;
-        this.add.image(w * 0.15, h * 0.45, 'amp-tower').setScale(ampScale);
-        this.add.image(w * 0.85, h * 0.45, 'amp-tower').setScale(ampScale).setFlipX(true);
+        const ampScale = Math.min(w, h) / 620;
+        this.add.image(w * 0.14, h * 0.40, 'amp-tower').setScale(ampScale);
+        this.add.image(w * 0.86, h * 0.40, 'amp-tower').setScale(ampScale).setFlipX(true);
 
-        // Monedas y nivel actual
-        this.add.text(w / 2, h * 0.52, `MONEDAS: ${playerData.coins} ¢  |  NIVEL MÁXIMO: ${playerData.maxLevelReached}`, {
-            fontSize: `${Math.min(w * 0.022, 16)}px`,
+        this.add.text(w / 2, h * 0.48, `MONEDAS: ${playerData.coins} ¢  |  NIVEL: ${playerData.currentLevel}`, {
+            fontSize: `${Math.min(w * 0.022, 15)}px`,
             fontFamily: 'Courier New, monospace',
             color: '#ffffff',
             backgroundColor: '#111111aa',
-            padding: { x: 12, y: 6 }
+            padding: { x: 12, y: 5 }
         }).setOrigin(0.5);
 
         // Botones de acción principales
-        const btnStartY = h * 0.60;
-        const btnSpacing = Math.min(h * 0.09, 58);
+        const btnStartY = h * 0.54;
+        const btnSpacing = Math.min(h * 0.08, 48);
 
         this._createRockButton(w / 2, btnStartY, `JUGAR NIVEL ${playerData.currentLevel}`, 0x00e676, () => {
             this.scene.start('GameScene', { mode: 'default', level: playerData.currentLevel });
         });
 
-        this._createRockButton(w / 2, btnStartY + btnSpacing, 'SUBIR TU MÚSICA (MP3/WAV)', 0xff1744, () => {
+        // BOTÓN 1 VS 1 ONLINE
+        this._createRockButton(w / 2, btnStartY + btnSpacing, '⚔ DUELO 1 VS 1 ONLINE ⚔', 0xff1744, () => {
+            MultiplayerManager.openLobby(this);
+        });
+
+        this._createRockButton(w / 2, btnStartY + btnSpacing * 2, 'SUBIR TU MÚSICA (MP3/WAV)', 0x2979ff, () => {
             this._handleAudioUpload();
         });
 
-        this._createRockButton(w / 2, btnStartY + btnSpacing * 2, 'TIENDA & PERSONALIZACIÓN', 0xffea00, () => {
+        this._createRockButton(w / 2, btnStartY + btnSpacing * 3, 'TIENDA & PERSONALIZACIÓN', 0xffea00, () => {
             this.scene.start('ShopScene');
         });
 
-        // Selección rápida de niveles
-        this._createLevelSelector(w / 2, btnStartY + btnSpacing * 3);
+        this._createLevelSelector(w / 2, btnStartY + btnSpacing * 4);
 
-        // Controles en el pie
-        const footerY = h - 25;
+        const footerY = h - 22;
         this.add.text(w / 2, footerY, 'CONTROLES: [Q] Hi-Hat  [W] Snare  [E] Tom  [R] Kick  |  MANTÉN EN NOTAS LARGAS', {
             fontSize: `${Math.min(w * 0.016, 12)}px`,
             fontFamily: 'Courier New, monospace',
-            color: '#aaaaaa'
+            color: '#888888'
         }).setOrigin(0.5);
 
-        // Manejar redimensionamiento
         this.scale.on('resize', this._onResize, this);
     }
 
     _drawMenuBackground(w, h) {
         this.bgGraphics.clear();
-        // Escenario oscuro con gradiente
         this.bgGraphics.fillStyle(0x0a0914);
         this.bgGraphics.fillRect(0, 0, w, h);
 
-        // Tarima de madera
         this.bgGraphics.fillStyle(0x2d1a0e);
-        this.bgGraphics.fillRect(0, h * 0.48, w, h * 0.52);
+        this.bgGraphics.fillRect(0, h * 0.44, w, h * 0.56);
         this.bgGraphics.fillStyle(0xd4af37, 0.4);
-        this.bgGraphics.fillRect(0, h * 0.48, w, 4);
+        this.bgGraphics.fillRect(0, h * 0.44, w, 4);
 
-        // Siluetas del público rockero en la parte inferior
         this.bgGraphics.fillStyle(0x05040a);
         const crowdCount = Math.floor(w / 25);
         for (let i = 0; i < crowdCount; i++) {
             const cx = i * 25 + 12;
             const ch = 40 + Math.sin(i * 1.5) * 15;
-            this.bgGraphics.fillCircle(cx, h - ch, 14); // Cabezas
-            this.bgGraphics.fillRect(cx - 14, h - ch + 8, 28, ch); // Hombros
-            // Manos con señal de rock (\m/)
+            this.bgGraphics.fillCircle(cx, h - ch, 14);
+            this.bgGraphics.fillRect(cx - 14, h - ch + 8, 28, ch);
             if (i % 3 === 0) {
                 this.bgGraphics.fillRect(cx - 18, h - ch - 12, 5, 14);
                 this.bgGraphics.fillRect(cx - 10, h - ch - 12, 5, 14);
@@ -756,17 +918,16 @@ class MenuScene extends Phaser.Scene {
     }
 
     _createRockButton(x, y, text, color, callback) {
-        const w = Math.min(this.scale.width * 0.65, 360);
-        const h = 42;
+        const w = Math.min(this.scale.width * 0.65, 340);
+        const h = 38;
 
         const container = this.add.container(x, y);
-
         const shadow = this.add.rectangle(4, 4, w, h, 0x000000, 0.8);
         const bg = this.add.rectangle(0, 0, w, h, 0x1e1e1e);
         bg.setStrokeStyle(3, color);
 
         const label = this.add.text(0, 0, text, {
-            fontSize: `${Math.min(this.scale.width * 0.022, 16)}px`,
+            fontSize: `${Math.min(this.scale.width * 0.021, 15)}px`,
             fontFamily: 'Impact, sans-serif',
             color: '#ffffff'
         }).setOrigin(0.5);
@@ -793,20 +954,20 @@ class MenuScene extends Phaser.Scene {
 
     _createLevelSelector(x, y) {
         const container = this.add.container(x, y);
-        this.add.text(x, y - 22, 'SELECCIONAR NIVEL:', {
-            fontSize: '12px', fontFamily: 'Courier New, monospace', color: '#ffea00'
+        this.add.text(x, y - 20, 'NIVEL:', {
+            fontSize: '11px', fontFamily: 'Courier New, monospace', color: '#ffea00'
         }).setOrigin(0.5);
 
         for (let i = 1; i <= 5; i++) {
-            const lx = (i - 3) * 65;
+            const lx = (i - 3) * 60;
             const isUnlocked = i <= playerData.maxLevelReached;
             const isSelected = i === playerData.currentLevel;
 
-            const box = this.add.rectangle(lx, 0, 50, 28, isSelected ? 0x00e676 : (isUnlocked ? 0x333333 : 0x151515));
+            const box = this.add.rectangle(lx, 0, 46, 26, isSelected ? 0x00e676 : (isUnlocked ? 0x333333 : 0x151515));
             box.setStrokeStyle(2, isUnlocked ? 0xffea00 : 0x555555);
 
             const txt = this.add.text(lx, 0, `N${i}`, {
-                fontSize: '13px', fontFamily: 'Impact, sans-serif',
+                fontSize: '12px', fontFamily: 'Impact, sans-serif',
                 color: isSelected ? '#000000' : (isUnlocked ? '#ffffff' : '#666666')
             }).setOrigin(0.5);
 
@@ -853,7 +1014,6 @@ class MenuScene extends Phaser.Scene {
     }
 
     update(time) {
-        // Mover focos de escenario
         for (let i = 0; i < this.spotlights.length; i++) {
             const s = this.spotlights[i];
             s.g.clear();
@@ -872,7 +1032,7 @@ class MenuScene extends Phaser.Scene {
 }
 
 // ----------------------------------------------------------------------------
-// ESCENA: GAMEPLAY (HIGHWAY 3D PSEUDO, ROTACIÓN, LÍNEA MÓVIL, HOLD NOTES)
+// ESCENA: GAMEPLAY (HIGHWAY 3D + MODO 1 VS 1 EN VIVO)
 // ----------------------------------------------------------------------------
 class GameScene extends Phaser.Scene {
     constructor() { super('GameScene'); }
@@ -880,6 +1040,7 @@ class GameScene extends Phaser.Scene {
     init(data) {
         this.mode = data.mode || 'default';
         this.level = data.level || 1;
+        this.is1v1 = (this.mode === '1v1');
 
         this.score = 0;
         this.combo = 0;
@@ -887,22 +1048,18 @@ class GameScene extends Phaser.Scene {
         this.multiplier = 1;
         this.hits = 0;
         this.misses = 0;
-        this.rockMeter = 0.65; // 0 (Fail) a 1 (Rock God)
+        this.rockMeter = 0.65;
 
-        // Mecánicas avanzadas según nivel
+        // Dificultades mecánicas
         this.enableMovingHitLine = this.level >= 3;
         this.enableBoardRotation = this.level >= 4;
 
-        // Estado del tablero 3D
-        this.boardAngle = 0; // 0 = Vertical, Math.PI/2 = Horizontal
+        this.boardAngle = 0;
         this.targetBoardAngle = 0;
-        this.isRotating = false;
 
-        // Estado de la línea de acierto (Z normalizado entre 0 y 1)
         this.baseHitZ = 0.85;
         this.currentHitZ = 0.85;
 
-        // Notas activas y sostén
         this.notes = [];
         this.holdingLanes = [false, false, false, false];
         this.activeHoldNotes = [null, null, null, null];
@@ -913,48 +1070,40 @@ class GameScene extends Phaser.Scene {
         this.duration = 40;
 
         this.customAudioSource = null;
+        this.lastStatsSync = 0;
     }
 
     create() {
         const w = this.scale.width;
         const h = this.scale.height;
 
-        // Teclas Q, W, E, R con addKey según especificación
         this.keyQ = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
         this.keyW = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W);
         this.keyE = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.E);
         this.keyR = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R);
         this.laneKeys = [this.keyQ, this.keyW, this.keyE, this.keyR];
-
-        // ESC para salir o pausar
         this.keyEsc = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
 
-        // Gráficos del escenario y la carretera 3D
         this.stageGraphics = this.add.graphics();
         this.highwayGraphics = this.add.graphics();
         this.sustainGraphics = this.add.graphics();
         this.effectsGraphics = this.add.graphics();
+        this.rivalGraphics = this.add.graphics();
 
-        // Receptores / Botones de acierto (4 carriles)
         this.receptors = [];
         for (let i = 0; i < LANE_COUNT; i++) {
             const r = this.add.image(0, 0, `receptor-${i}`).setOrigin(0.5);
             this.receptors.push(r);
         }
 
-        // Baterista de escenario en el horizonte 3D
         this.drummer = this.add.image(w / 2, h * 0.22, 'drummer-base').setScale(0.85);
 
-        // UI: Score, Multiplier, Rock Meter, Combo
         this._createRockHUD();
 
-        // Generar o cargar canciones
         this._loadSong();
 
-        // Cuenta regresiva
         this._startCountdown();
 
-        // Manejar redimensionamiento de pantalla completa
         this.scale.on('resize', () => {
             this.cameras.main.setViewport(0, 0, this.scale.width, this.scale.height);
         });
@@ -964,7 +1113,6 @@ class GameScene extends Phaser.Scene {
         const w = this.scale.width;
         const h = this.scale.height;
 
-        // Panel de puntuación superior izquierdo
         this.scoreText = this.add.text(30, 25, 'SCORE: 0', {
             fontSize: '24px', fontFamily: 'Impact, sans-serif',
             color: '#ffffff', stroke: '#000000', strokeThickness: 5
@@ -975,27 +1123,42 @@ class GameScene extends Phaser.Scene {
             color: '#ffea00', stroke: '#000000', strokeThickness: 6
         });
 
-        // Combo central
         this.comboText = this.add.text(w / 2, 80, '', {
             fontSize: '28px', fontFamily: 'Impact, sans-serif',
             color: '#00e676', stroke: '#000000', strokeThickness: 6
         }).setOrigin(0.5);
 
-        // Feedback de acierto (PERFECT / GREAT / GOOD)
         this.ratingText = this.add.text(w / 2, h * 0.65, '', {
             fontSize: '36px', fontFamily: 'Impact, sans-serif',
             color: '#ffffff', stroke: '#000000', strokeThickness: 6
         }).setOrigin(0.5).setAlpha(0);
 
-        // Banner de Alerta para eventos de dificultad (Línea móvil / Rotación)
         this.alertBanner = this.add.text(w / 2, h * 0.35, '', {
             fontSize: '26px', fontFamily: 'Impact, sans-serif',
             color: '#ff1744', stroke: '#000000', strokeThickness: 6,
             backgroundColor: '#000000cc', padding: { x: 20, y: 8 }
         }).setOrigin(0.5).setAlpha(0);
 
-        // Rock Meter (Medidor de energía estilo Guitar Hero clásico en la derecha)
         this.rockMeterGraphics = this.add.graphics();
+
+        // HUD ESPECIAL PARA MODO 1 VS 1 (FACE-OFF)
+        if (this.is1v1) {
+            this.rivalScoreText = this.add.text(w - 30, 25, 'RIVAL: 0', {
+                fontSize: '24px', fontFamily: 'Impact, sans-serif',
+                color: '#ff1744', stroke: '#000000', strokeThickness: 5
+            }).setOrigin(1, 0);
+
+            this.rivalComboText = this.add.text(w - 30, 60, 'COMBO: 0', {
+                fontSize: '20px', fontFamily: 'Impact, sans-serif',
+                color: '#ffea00', stroke: '#000000', strokeThickness: 4
+            }).setOrigin(1, 0);
+
+            // Barra superior de balance del duelo (Tug-of-war)
+            this.duelBalanceText = this.add.text(w / 2, 22, '⚔ DUELO EN VIVO ⚔', {
+                fontSize: '15px', fontFamily: 'Impact, sans-serif',
+                color: '#ffea00', stroke: '#000000', strokeThickness: 4
+            }).setOrigin(0.5);
+        }
     }
 
     _loadSong() {
@@ -1009,13 +1172,12 @@ class GameScene extends Phaser.Scene {
             this.duration = res.duration;
         }
 
-        // Crear objetos de notas activas
         this.notes = this.notesData.map(nd => ({
             time: nd.time,
             lane: nd.lane,
             duration: nd.duration || 0,
             sprite: this.add.image(-100, -100, `note-gem-${nd.lane}`).setVisible(false),
-            state: 'pending', // pending, hit, holding, missed
+            state: 'pending',
             holdProgress: 0,
             scored: false
         }));
@@ -1040,7 +1202,7 @@ class GameScene extends Phaser.Scene {
                     countText.setText(count.toString());
                     SoundSynth.playHiHat();
                 } else if (count === 0) {
-                    countText.setText('¡ROCK!');
+                    countText.setText(this.is1v1 ? '¡DUELO!' : '¡ROCK!');
                     countText.setColor('#00e676');
                     SoundSynth.playSnare();
                 } else {
@@ -1055,7 +1217,6 @@ class GameScene extends Phaser.Scene {
         this.isPlaying = true;
         this.gameStartTime = this.time.now;
 
-        // Iniciar audio si es personalizado
         if (this.mode === 'custom-audio' && customAudioData.buffer) {
             SoundSynth.init();
             this.customAudioSource = SoundSynth.ctx.createBufferSource();
@@ -1064,7 +1225,6 @@ class GameScene extends Phaser.Scene {
             this.customAudioSource.start(0);
         }
 
-        // Eventos periódicos de dificultad (Rotación y advertencias)
         if (this.enableBoardRotation) {
             this.time.addEvent({
                 delay: 11000,
@@ -1076,7 +1236,6 @@ class GameScene extends Phaser.Scene {
 
     _triggerBoardRotation() {
         if (!this.isPlaying) return;
-        // Alternar entre 0 (Vertical) y Math.PI/2 (Horizontal)
         const nextAngle = this.targetBoardAngle === 0 ? Math.PI / 2 : 0;
         const textMsg = nextAngle === 0 ? '⬇ TABLERO VERTICAL ⬇' : '➡ ¡ROTACIÓN HORIZONTAL! ➡';
 
@@ -1104,13 +1263,6 @@ class GameScene extends Phaser.Scene {
         });
     }
 
-    // ------------------------------------------------------------------------
-    // MATEMÁTICA DE PERSPECTIVA 3D PSEUDO-ROTATORIA
-    // ------------------------------------------------------------------------
-    /**
-     * Calcula la posición de pantalla (x, y), ancho y escala para una profundidad Z
-     * con orientación de tablero rotatoria en ángulo theta.
-     */
     _getPerspectivePoint(lane, z, theta = this.boardAngle) {
         const w = this.scale.width;
         const h = this.scale.height;
@@ -1121,16 +1273,13 @@ class GameScene extends Phaser.Scene {
         const topWidth = Math.min(w, h) * 0.16;
         const bottomWidth = Math.min(w, h) * 0.58;
 
-        // Curva de perspectiva (t acelera hacia la cámara)
         const t = Math.pow(Math.max(0, Math.min(1, z)), 1.6);
 
-        // Vector axial de la carretera y vector transversal
         const uX = Math.sin(theta);
         const uY = Math.cos(theta);
         const vX = Math.cos(theta);
         const vY = -Math.sin(theta);
 
-        // Origen lejano (horizonte) y destino cercano
         const horizDist = highwayLength * 0.45;
         const nearDist = highwayLength * 0.45;
 
@@ -1139,14 +1288,11 @@ class GameScene extends Phaser.Scene {
         const nx = cx + uX * nearDist;
         const ny = cy + uY * nearDist;
 
-        // Centro en profundidad z
         const curX = hx + (nx - hx) * t;
         const curY = hy + (ny - hy) * t;
 
-        // Ancho de la carretera en profundidad z
         const curW = topWidth + (bottomWidth - topWidth) * t;
 
-        // Desplazamiento del carril (-1.5 a +1.5)
         const laneOffset = (lane - 1.5) / 2.0;
         const px = curX + vX * (laneOffset * curW);
         const py = curY + vY * (laneOffset * curW);
@@ -1163,39 +1309,38 @@ class GameScene extends Phaser.Scene {
         const h = this.scale.height;
         this.songTime = (time - this.gameStartTime) / 1000;
 
-        // Salir con ESC
         if (Phaser.Input.Keyboard.JustDown(this.keyEsc)) {
             this._endGame();
             return;
         }
 
-        // 1. Dinámica de la línea de acierto (sube y baja si está habilitada)
         if (this.enableMovingHitLine) {
-            // Oscilación suave senoidal
             this.currentHitZ = this.baseHitZ + Math.sin(this.songTime * 2.5) * 0.10;
         } else {
             this.currentHitZ = this.baseHitZ;
         }
 
-        // 2. Renderizar escenario de fondo y focos
         this._renderStage(w, h, time);
-
-        // 3. Renderizar carretera 3D y divisores de carriles
         this._render3DHighway();
-
-        // 4. Actualizar receptores según la línea de acierto actual
         this._updateReceptors();
-
-        // 5. Procesar entradas de teclas Q, W, E, R
         this._handleKeyInputs(delta);
-
-        // 6. Actualizar y proyectar notas
         this._updateNotes();
-
-        // 7. Actualizar Rock Meter y HUD
         this._updateHUD();
 
-        // 8. Verificar fin de canción
+        // Enviar estadísticas en tiempo real por WebRTC si es 1 vs 1
+        if (this.is1v1 && time - this.lastStatsSync > 80) {
+            this.lastStatsSync = time;
+            MultiplayerManager.sendStats({
+                score: this.score,
+                combo: this.combo,
+                multiplier: this.multiplier,
+                rockMeter: this.rockMeter,
+                hits: this.hits,
+                misses: this.misses
+            });
+            this._render1v1Balance(w);
+        }
+
         if (this.songTime > this.duration + 2.5) {
             this._endGame();
         }
@@ -1203,15 +1348,12 @@ class GameScene extends Phaser.Scene {
 
     _renderStage(w, h, time) {
         this.stageGraphics.clear();
-        // Fondo negro profundo
         this.stageGraphics.fillStyle(0x06060c);
         this.stageGraphics.fillRect(0, 0, w, h);
 
-        // Tarima
         this.stageGraphics.fillStyle(0x1a110a);
         this.stageGraphics.fillRect(0, h * 0.45, w, h * 0.55);
 
-        // Focos de luces cruzadas
         for (let i = 0; i < 4; i++) {
             const col = LANE_COLORS[i];
             const pulse = 0.05 + 0.03 * Math.sin(time * 0.005 + i);
@@ -1225,7 +1367,6 @@ class GameScene extends Phaser.Scene {
             this.stageGraphics.fillPath();
         }
 
-        // Baterista tocando en el horizonte
         const horiz = this._getPerspectivePoint(1.5, 0.05);
         this.drummer.setPosition(horiz.centerX, horiz.centerY - 25);
     }
@@ -1233,13 +1374,11 @@ class GameScene extends Phaser.Scene {
     _render3DHighway() {
         this.highwayGraphics.clear();
 
-        // Dibujar cuerpo trapezoidal de la carretera
         const pTopLeft = this._getPerspectivePoint(0, 0);
         const pTopRight = this._getPerspectivePoint(3, 0);
         const pBotLeft = this._getPerspectivePoint(0, 1);
         const pBotRight = this._getPerspectivePoint(3, 1);
 
-        // Asfalto / Madera de la carretera Guitar Hero
         const themeColor = playerData.highwayTheme === 'neon' ? 0x051b2c : 0x18181c;
         this.highwayGraphics.fillStyle(themeColor, 0.95);
         this.highwayGraphics.beginPath();
@@ -1250,7 +1389,6 @@ class GameScene extends Phaser.Scene {
         this.highwayGraphics.closePath();
         this.highwayGraphics.fillPath();
 
-        // Rieles metálicos laterales
         this.highwayGraphics.lineStyle(4, 0xd4af37, 1);
         this.highwayGraphics.lineBetween(
             pTopLeft.x - pTopLeft.vX * 25, pTopLeft.y - pTopLeft.vY * 25,
@@ -1261,7 +1399,6 @@ class GameScene extends Phaser.Scene {
             pBotRight.x + pBotRight.vX * 55, pBotRight.y + pBotRight.vY * 55
         );
 
-        // Divisores de carriles en 3D
         this.highwayGraphics.lineStyle(2, 0x444455, 0.6);
         for (let i = 0.5; i <= 2.5; i += 1.0) {
             const pStart = this._getPerspectivePoint(i, 0);
@@ -1269,7 +1406,6 @@ class GameScene extends Phaser.Scene {
             this.highwayGraphics.lineBetween(pStart.x, pStart.y, pEnd.x, pEnd.y);
         }
 
-        // Barras de compás rítmicas viajando hacia el jugador
         const beatOffset = (this.songTime * 2.0) % 1.0;
         for (let b = 0; b < 6; b++) {
             const zBar = (b + beatOffset) / 6.0;
@@ -1281,7 +1417,6 @@ class GameScene extends Phaser.Scene {
             }
         }
 
-        // Línea de acierto móvil (conecta los 4 receptores)
         const hitL = this._getPerspectivePoint(0, this.currentHitZ);
         const hitR = this._getPerspectivePoint(3, this.currentHitZ);
         this.highwayGraphics.lineStyle(4, 0xffffff, 0.8);
@@ -1296,7 +1431,6 @@ class GameScene extends Phaser.Scene {
             rec.setScale(pt.scale * 1.1);
             rec.setRotation(this.boardAngle);
 
-            // Resplandor si está presionada la tecla correspondiente
             const isDown = this.laneKeys[i].isDown;
             if (isDown) {
                 rec.setTint(0xffffff);
@@ -1311,34 +1445,28 @@ class GameScene extends Phaser.Scene {
         for (let i = 0; i < LANE_COUNT; i++) {
             const key = this.laneKeys[i];
 
-            // 1. Detección de pulsación inicial (JustDown)
             if (Phaser.Input.Keyboard.JustDown(key)) {
                 this._onLaneHit(i);
             }
 
-            // 2. Manejo de nota sostenida (Hold) mientras la tecla sigue presionada
             if (key.isDown && this.activeHoldNotes[i]) {
                 const holdNote = this.activeHoldNotes[i];
                 const dtSec = delta / 1000;
                 holdNote.holdProgress += dtSec;
 
-                // Sumar puntos continuos y sonido
                 this.score += Math.floor(25 * this.multiplier);
                 this.rockMeter = Math.min(1.0, this.rockMeter + 0.003);
 
-                // Efecto de rayos / chispas en el receptor
                 this._spawnHoldSparks(i);
 
                 if (Math.random() < 0.25) {
                     SoundSynth.playSustainTone(i);
                 }
 
-                // Completar nota sostenida
                 if (holdNote.holdProgress >= holdNote.duration) {
                     this._onHoldComplete(i, holdNote);
                 }
             } else if (!key.isDown && this.activeHoldNotes[i]) {
-                // Se soltó la tecla antes de tiempo (Rotura de hold)
                 this._onHoldBreak(i);
             }
         }
@@ -1347,15 +1475,14 @@ class GameScene extends Phaser.Scene {
     _onLaneHit(lane) {
         SoundSynth.playLane(lane);
 
-        // Buscar nota pendiente más cercana a la línea de acierto actual
         let bestNote = null;
         let minDiff = Infinity;
-        const approachTime = 1.6; // Segundos que tarda la nota desde el horizonte hasta la línea de acierto
+        const approachTime = 1.6;
 
         for (const n of this.notes) {
             if (n.lane === lane && n.state === 'pending') {
                 const diff = Math.abs(this.songTime - n.time);
-                if (diff < minDiff && diff < 0.28) { // Ventana de tolerancia
+                if (diff < minDiff && diff < 0.28) {
                     minDiff = diff;
                     bestNote = n;
                 }
@@ -1363,7 +1490,6 @@ class GameScene extends Phaser.Scene {
         }
 
         if (bestNote) {
-            // Evaluar precisión del impacto
             let rating = 'GOOD';
             let pts = 50;
             let ratingColor = '#2979ff';
@@ -1383,17 +1509,13 @@ class GameScene extends Phaser.Scene {
             this.hits++;
             if (this.combo > this.maxCombo) this.maxCombo = this.combo;
 
-            // Multiplicador estilo Guitar Hero (1x -> 2x -> 3x -> 4x)
             this.multiplier = Math.min(4, 1 + Math.floor(this.combo / 10));
-
-            // Mejorar Rock Meter
             this.rockMeter = Math.min(1.0, this.rockMeter + 0.05);
 
             this._showRating(rating, ratingColor);
             this._spawnHitParticles(lane);
 
             if (bestNote.duration > 0) {
-                // Iniciar nota sostenida
                 bestNote.state = 'holding';
                 this.activeHoldNotes[lane] = bestNote;
             } else {
@@ -1401,7 +1523,6 @@ class GameScene extends Phaser.Scene {
                 bestNote.sprite.setVisible(false);
             }
         } else {
-            // Golpe al aire: penalización en Rock Meter
             this.rockMeter = Math.max(0, this.rockMeter - 0.04);
             if (this.combo > 5) {
                 this.combo = 0;
@@ -1415,7 +1536,6 @@ class GameScene extends Phaser.Scene {
         note.sprite.setVisible(false);
         this.activeHoldNotes[lane] = null;
 
-        // Bonus por completar el hold
         this.score += 200 * this.multiplier;
         playerData.coins += 2;
         this._showRating('HOLD MAX!', '#ffea00');
@@ -1446,12 +1566,9 @@ class GameScene extends Phaser.Scene {
                 continue;
             }
 
-            // Progreso Z de la nota hacia la línea de acierto
             const timeDiff = n.time - this.songTime;
-            // z va de 0 (horizonte) a currentHitZ (en el momento de impacto)
             const z = this.currentHitZ - (timeDiff / approachTime) * this.currentHitZ;
 
-            // 1. Comprobar si se perdió la nota (Miss)
             if (timeDiff < -0.22 && n.state === 'pending') {
                 n.state = 'missed';
                 n.sprite.setVisible(false);
@@ -1464,7 +1581,6 @@ class GameScene extends Phaser.Scene {
                 continue;
             }
 
-            // 2. Renderizar si está visible en la carretera
             if (z >= 0.0 && z <= 1.05) {
                 const pt = this._getPerspectivePoint(n.lane, z);
                 n.sprite.setPosition(pt.x, pt.y);
@@ -1472,7 +1588,6 @@ class GameScene extends Phaser.Scene {
                 n.sprite.setRotation(this.boardAngle);
                 n.sprite.setVisible(true);
 
-                // 3. Dibujar estela / rayo para notas sostenidas (Hold Notes)
                 if (n.duration > 0 && n.state !== 'missed') {
                     const tailDurationRemaining = n.state === 'holding' ? (n.duration - n.holdProgress) : n.duration;
                     const zTailEnd = z - (tailDurationRemaining / approachTime) * this.currentHitZ;
@@ -1480,12 +1595,10 @@ class GameScene extends Phaser.Scene {
                     const pHead = pt;
                     const pTail = this._getPerspectivePoint(n.lane, Math.max(0, zTailEnd));
 
-                    // Dibujar rayo láser eléctrico pixel art en perspectiva
                     const col = LANE_COLORS[n.lane];
                     this.sustainGraphics.lineStyle(Math.max(3, pt.scale * 12), col, 0.85);
                     this.sustainGraphics.lineBetween(pHead.x, pHead.y, pTail.x, pTail.y);
 
-                    // Núcleo blanco brillante del rayo
                     this.sustainGraphics.lineStyle(Math.max(1.5, pt.scale * 4), 0xffffff, 0.95);
                     this.sustainGraphics.lineBetween(pHead.x, pHead.y, pTail.x, pTail.y);
                 }
@@ -1558,7 +1671,12 @@ class GameScene extends Phaser.Scene {
             this.comboText.setText('');
         }
 
-        // Dibujar Rock Meter estilo Guitar Hero en el costado derecho
+        if (this.is1v1) {
+            const r = MultiplayerManager.rivalStats;
+            this.rivalScoreText.setText(`RIVAL: ${r.score}`);
+            this.rivalComboText.setText(`COMBO: ${r.combo} (${r.multiplier}X)`);
+        }
+
         this._renderRockMeter();
     }
 
@@ -1572,13 +1690,11 @@ class GameScene extends Phaser.Scene {
         const mH = 140;
         const mW = 20;
 
-        // Borde oscuro del medidor
         g.fillStyle(0x000000, 0.8);
         g.fillRect(mx - 2, my - 2, mW + 4, mH + 4);
         g.lineStyle(2, 0xd4af37, 1);
         g.strokeRect(mx - 2, my - 2, mW + 4, mH + 4);
 
-        // Zonas del medidor (Rojo abajo, Amarillo al centro, Verde arriba)
         g.fillStyle(0x220000);
         g.fillRect(mx, my + mH * 0.66, mW, mH * 0.34);
         g.fillStyle(0x222200);
@@ -1586,14 +1702,41 @@ class GameScene extends Phaser.Scene {
         g.fillStyle(0x002200);
         g.fillRect(mx, my, mW, mH * 0.33);
 
-        // Barra de nivel del jugador
         const fillHeight = mH * this.rockMeter;
-        let fillColor = 0x00e676; // Verde
-        if (this.rockMeter < 0.33) fillColor = 0xff1744; // Rojo
-        else if (this.rockMeter < 0.66) fillColor = 0xffea00; // Amarillo
+        let fillColor = 0x00e676;
+        if (this.rockMeter < 0.33) fillColor = 0xff1744;
+        else if (this.rockMeter < 0.66) fillColor = 0xffea00;
 
         g.fillStyle(fillColor, 1.0);
         g.fillRect(mx + 2, my + mH - fillHeight, mW - 4, fillHeight);
+    }
+
+    _render1v1Balance(w) {
+        const g = this.rivalGraphics;
+        g.clear();
+
+        // Barra de balance de duelo Guitar Hero Face-Off (Tug-of-war)
+        const barW = Math.min(w * 0.4, 280);
+        const barH = 10;
+        const bx = (w - barW) / 2;
+        const by = 45;
+
+        g.fillStyle(0x000000, 0.8);
+        g.fillRect(bx - 2, by - 2, barW + 4, barH + 4);
+
+        // Lado TÚ (Verde) vs Lado RIVAL (Rojo)
+        const total = Math.max(1, this.score + MultiplayerManager.rivalStats.score);
+        const myRatio = this.score / total;
+
+        g.fillStyle(0x00e676, 1);
+        g.fillRect(bx, by, barW * myRatio, barH);
+
+        g.fillStyle(0xff1744, 1);
+        g.fillRect(bx + barW * myRatio, by, barW * (1 - myRatio), barH);
+
+        // Indicador central
+        g.fillStyle(0xffffff, 1);
+        g.fillRect(bx + barW * myRatio - 2, by - 4, 4, barH + 8);
     }
 
     _endGame() {
@@ -1608,7 +1751,15 @@ class GameScene extends Phaser.Scene {
         const accuracy = totalNotes > 0 ? Math.round((this.hits / totalNotes) * 100) : 0;
         const passed = accuracy >= 50 && this.rockMeter > 0.15;
 
-        // Calcular recompensa de monedas
+        // Avisar fin al rival por P2P si es 1v1
+        if (this.is1v1) {
+            MultiplayerManager.send({
+                type: 'game_over',
+                finalScore: this.score,
+                accuracy: accuracy
+            });
+        }
+
         const coinsEarned = Math.floor(this.score / 60) + (passed ? 30 : 5);
         playerData.coins += coinsEarned;
         playerData.totalScore += this.score;
@@ -1622,6 +1773,7 @@ class GameScene extends Phaser.Scene {
         if (passed) SoundSynth.playCheer();
 
         this.scene.start('ResultScene', {
+            is1v1: this.is1v1,
             score: this.score,
             combo: this.maxCombo,
             hits: this.hits,
@@ -1636,7 +1788,7 @@ class GameScene extends Phaser.Scene {
 }
 
 // ----------------------------------------------------------------------------
-// ESCENA: RESULTADOS DEL RECITAL
+// ESCENA: RESULTADOS (INDIVIDUAL & DUELO 1 VS 1)
 // ----------------------------------------------------------------------------
 class ResultScene extends Phaser.Scene {
     constructor() { super('ResultScene'); }
@@ -1647,11 +1799,84 @@ class ResultScene extends Phaser.Scene {
         const w = this.scale.width;
         const h = this.scale.height;
 
-        // Fondo oscuro
         const g = this.add.graphics();
         g.fillStyle(0x0a0914, 1);
         g.fillRect(0, 0, w, h);
 
+        if (this.res.is1v1) {
+            this._render1v1Results(w, h);
+        } else {
+            this._renderSingleResults(w, h);
+        }
+    }
+
+    _render1v1Results(w, h) {
+        const rivalScore = MultiplayerManager.rivalStats.score || MultiplayerManager.rivalStats.finalScore || 0;
+        const myScore = this.res.score;
+
+        const iWon = myScore > rivalScore;
+        const isTie = myScore === rivalScore;
+
+        const titleText = isTie ? '⚡ ¡EMPATE DE LEYENDAS! ⚡' : (iWon ? '👑 ¡VICTORIA! ¡ERES EL REY DEL ROCK!' : '💀 ¡DERROTA! EL RIVAL TE VENCIÓ');
+        const titleColor = isTie ? '#ffea00' : (iWon ? '#00e676' : '#ff1744');
+
+        this.add.text(w / 2, h * 0.12, titleText, {
+            fontSize: `${Math.min(w * 0.055, 38)}px`,
+            fontFamily: 'Impact, sans-serif',
+            color: titleColor,
+            stroke: '#000000',
+            strokeThickness: 8
+        }).setOrigin(0.5);
+
+        // Comparativa Cara a Cara
+        const colW = w * 0.35;
+        const myX = w * 0.30;
+        const rivalX = w * 0.70;
+
+        // Tarjeta Tuya
+        this.add.rectangle(myX, h * 0.42, colW, 200, 0x12101e).setStrokeStyle(3, 0x00e676);
+        this.add.text(myX, h * 0.42 - 70, '🎸 TÚ', {
+            fontSize: '22px', fontFamily: 'Impact, sans-serif', color: '#00e676'
+        }).setOrigin(0.5);
+        this.add.text(myX, h * 0.42 - 30, `SCORE: ${myScore}`, {
+            fontSize: '20px', fontFamily: 'Impact, sans-serif', color: '#ffffff'
+        }).setOrigin(0.5);
+        this.add.text(myX, h * 0.42 + 5, `PRECISIÓN: ${this.res.accuracy}%`, {
+            fontSize: '15px', fontFamily: 'Courier New, monospace', color: '#aaaaaa'
+        }).setOrigin(0.5);
+        this.add.text(myX, h * 0.42 + 35, `MAX COMBO: ${this.res.combo}`, {
+            fontSize: '15px', fontFamily: 'Courier New, monospace', color: '#aaaaaa'
+        }).setOrigin(0.5);
+
+        // Tarjeta Rival
+        this.add.rectangle(rivalX, h * 0.42, colW, 200, 0x12101e).setStrokeStyle(3, 0xff1744);
+        this.add.text(rivalX, h * 0.42 - 70, '🔥 RIVAL', {
+            fontSize: '22px', fontFamily: 'Impact, sans-serif', color: '#ff1744'
+        }).setOrigin(0.5);
+        this.add.text(rivalX, h * 0.42 - 30, `SCORE: ${rivalScore}`, {
+            fontSize: '20px', fontFamily: 'Impact, sans-serif', color: '#ffffff'
+        }).setOrigin(0.5);
+        this.add.text(rivalX, h * 0.42 + 5, `ACERTADAS: ${MultiplayerManager.rivalStats.hits || 0}`, {
+            fontSize: '15px', fontFamily: 'Courier New, monospace', color: '#aaaaaa'
+        }).setOrigin(0.5);
+        this.add.text(rivalX, h * 0.42 + 35, `FALLADAS: ${MultiplayerManager.rivalStats.misses || 0}`, {
+            fontSize: '15px', fontFamily: 'Courier New, monospace', color: '#aaaaaa'
+        }).setOrigin(0.5);
+
+        // Botones
+        const btnY = h * 0.78;
+        this._createButton(w * 0.32, btnY, 'MENÚ PRINCIPAL', 0x333333, () => {
+            MultiplayerManager.cleanup();
+            this.scene.start('MenuScene');
+        });
+
+        this._createButton(w * 0.68, btnY, '🔄 REVANCHA', 0xffea00, () => {
+            MultiplayerManager.send({ type: 'rematch_req' });
+            this.scene.start('GameScene', { mode: '1v1', isHost: MultiplayerManager.isHost, level: this.res.level });
+        });
+    }
+
+    _renderSingleResults(w, h) {
         const titleText = this.res.passed ? '¡CONCIERTO LEGENDARIO!' : '¡ABUCHEO EN EL ESCENARIO!';
         const titleColor = this.res.passed ? '#00e676' : '#ff1744';
 
@@ -1663,14 +1888,12 @@ class ResultScene extends Phaser.Scene {
             strokeThickness: 8
         }).setOrigin(0.5);
 
-        // Estrellas doradas Guitar Hero
         const stars = this.res.accuracy >= 95 ? '★★★★★' : this.res.accuracy >= 80 ? '★★★★☆' : this.res.accuracy >= 65 ? '★★★☆☆' : '★★☆☆☆';
         this.add.text(w / 2, h * 0.22, stars, {
             fontSize: '52px', fontFamily: 'Impact, sans-serif',
             color: '#ffea00', stroke: '#000000', strokeThickness: 6
         }).setOrigin(0.5);
 
-        // Resumen de estadísticas
         const stats = [
             `PUNTUACIÓN FINAL: ${this.res.score}`,
             `MÁXIMO COMBO: ${this.res.combo}`,
@@ -1689,7 +1912,6 @@ class ResultScene extends Phaser.Scene {
             }).setOrigin(0.5);
         });
 
-        // Botones
         const btnY = h * 0.75;
         this._createButton(w * 0.32, btnY, 'MENÚ PRINCIPAL', 0x333333, () => {
             this.scene.start('MenuScene');
@@ -1739,10 +1961,8 @@ class ShopScene extends Phaser.Scene {
             fontSize: '18px', fontFamily: 'Courier New, monospace', color: '#00e676'
         }).setOrigin(0.5);
 
-        // Preview del baterista a la derecha
         this._updatePreview();
 
-        // Secciones de compra
         this._createSection('COLOR DE BATERÍA', h * 0.22, [
             { col: 0x886644, name: 'Madera', price: 0, prop: 'drumColor', list: 'unlockedDrums' },
             { col: 0xcc2222, name: 'Rojo Fuego', price: 40, prop: 'drumColor', list: 'unlockedDrums' },
@@ -1765,7 +1985,6 @@ class ShopScene extends Phaser.Scene {
             { col: 0xffea00, name: 'Chaqueta Dorada', price: 90, prop: 'outfitColor', list: 'unlockedOutfits' }
         ]);
 
-        // Botón Volver
         const backBtn = this.add.rectangle(w / 2, h - 45, 200, 40, 0x1e1e1e).setStrokeStyle(3, 0xff1744);
         const backTxt = this.add.text(w / 2, h - 45, 'VOLVER AL MENÚ', {
             fontSize: '15px', fontFamily: 'Impact, sans-serif', color: '#ffffff'

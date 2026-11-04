@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Pixel Drums: Guitar Hero Edition</title>
+    <!-- Phaser 3 CDN -->
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <!-- PeerJS CDN para 1 vs 1 multijugador P2P WebRTC sin backend -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -12,6 +15,7 @@
             box-sizing: border-box;
             user-select: none;
             -webkit-user-select: none;
+            font-family: 'Impact', 'Trebuchet MS', monospace, sans-serif;
         }
         html, body {
             width: 100%;
@@ -41,12 +45,162 @@
             position: fixed;
             z-index: 1000;
         }
+
+        /* Modal Retro para Lobby 1 vs 1 */
+        #lobby-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(4px);
+            z-index: 9999;
+            justify-content: center;
+            align-items: center;
+        }
+        .lobby-card {
+            background: #12101e;
+            border: 4px solid #ffea00;
+            box-shadow: 0 0 25px rgba(255, 234, 0, 0.4), inset 0 0 15px rgba(255, 23, 68, 0.2);
+            padding: 24px;
+            width: 90%;
+            max-width: 440px;
+            text-align: center;
+            color: #ffffff;
+            position: relative;
+        }
+        .lobby-title {
+            font-size: 28px;
+            color: #ffea00;
+            text-shadow: 2px 2px #ff1744;
+            margin-bottom: 16px;
+            letter-spacing: 1px;
+        }
+        .lobby-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .lobby-tab-btn {
+            flex: 1;
+            padding: 10px;
+            background: #222233;
+            border: 2px solid #555577;
+            color: #aaaaaa;
+            cursor: pointer;
+            font-size: 15px;
+            transition: all 0.2s;
+        }
+        .lobby-tab-btn.active {
+            background: #ff1744;
+            border-color: #ffea00;
+            color: #ffffff;
+            font-weight: bold;
+        }
+        .tab-content {
+            display: none;
+            flex-direction: column;
+            gap: 14px;
+            align-items: center;
+        }
+        .tab-content.active {
+            display: flex;
+        }
+        .code-display {
+            background: #000000;
+            border: 2px dashed #00e676;
+            color: #00e676;
+            font-size: 26px;
+            padding: 10px 18px;
+            letter-spacing: 4px;
+            cursor: pointer;
+            user-select: all;
+            margin: 6px 0;
+        }
+        .lobby-input {
+            width: 100%;
+            padding: 12px;
+            background: #000000;
+            border: 2px solid #2979ff;
+            color: #ffffff;
+            font-size: 20px;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            outline: none;
+        }
+        .lobby-btn {
+            width: 100%;
+            padding: 12px;
+            background: #00e676;
+            border: 2px solid #ffffff;
+            color: #000000;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.1s, background 0.2s;
+        }
+        .lobby-btn:hover {
+            background: #1de9b6;
+            transform: scale(1.02);
+        }
+        .lobby-btn:active {
+            transform: scale(0.98);
+        }
+        .lobby-close {
+            position: absolute;
+            top: 10px;
+            right: 14px;
+            background: transparent;
+            border: none;
+            color: #ff1744;
+            font-size: 22px;
+            cursor: pointer;
+        }
+        .status-msg {
+            font-size: 13px;
+            color: #ffea00;
+            font-family: monospace;
+            min-height: 20px;
+        }
     </style>
 </head>
 <body>
     <div id="file-input-container">
         <input type="file" id="audio-upload" accept="audio/*" />
     </div>
+
+    <!-- Modal Lobby 1 vs 1 -->
+    <div id="lobby-modal">
+        <div class="lobby-card">
+            <button class="lobby-close" onclick="closeLobbyModal()">✕</button>
+            <div class="lobby-title">⚔ DUELO 1 VS 1 ONLINE ⚔</div>
+            
+            <div class="lobby-tabs">
+                <button class="lobby-tab-btn active" id="tab-host-btn" onclick="switchLobbyTab('host')">CREAR SALA</button>
+                <button class="lobby-tab-btn" id="tab-join-btn" onclick="switchLobbyTab('join')">UNIRSE A SALA</button>
+            </div>
+
+            <!-- Panel Crear Sala (Host) -->
+            <div class="tab-content active" id="tab-host">
+                <p style="font-size: 13px; color: #cccccc;">Comparte este código con tu rival para que entre a tu sala:</p>
+                <div class="code-display" id="my-room-code" onclick="copyRoomCode()" title="Haz clic para copiar">GENERANDO...</div>
+                <button class="lobby-btn" onclick="copyRoomCode()" style="background:#ffea00;">📋 COPIAR CÓDIGO</button>
+                <div class="status-msg" id="host-status">Esperando a que el rival se conecte...</div>
+            </div>
+
+            <!-- Panel Unirse a Sala (Client) -->
+            <div class="tab-content" id="tab-join">
+                <p style="font-size: 13px; color: #cccccc;">Pega el código de sala que te dio tu amigo:</p>
+                <input type="text" class="lobby-input" id="join-room-input" placeholder="EJ: ROCK-928" maxlength="15" />
+                <button class="lobby-btn" onclick="joinRoomFromInput()">🚀 ENTRAR AL DUELO</button>
+                <div class="status-msg" id="join-status"></div>
+            </div>
+        </div>
+    </div>
+
     <div id="game-container"></div>
     <script src="game.js"></script>
 </body>
