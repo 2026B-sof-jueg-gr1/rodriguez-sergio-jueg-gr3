@@ -1,46 +1,66 @@
-# 🥁 Pixel Drums - 8-Bit Rhythm Game
+# 🎸 PIXEL DRUMS: GUITAR HERO 3D EDITION
 
 **Mi Proyecto Phaser - Sergio Rodríguez**
 
-Un juego de ritmo estilo "Guitar Hero" enfocado en tocar la batería, con estética pixel art de 8-bits, construido con **Phaser 3**.
+Videojuego de ritmo con estética clásica **Guitar Hero en perspectiva Pseudo-3D Pixel Art**, desarrollado con **Phaser 3**, **Web Audio API** y **Arcade Physics**.
 
-## 🎮 Cómo Jugar
+---
 
-1. Abre el juego en [GitHub Pages](https://2026b-sof-jueg-gr3.github.io/rodriguez-sergio-jueg-gr3/mi-primer-juego/)
-2. Usa las teclas **Q, W, E, R** para golpear las 4 pistas de la batería
-3. Presiona la tecla correcta cuando la nota llegue a la zona de acierto
+## 🎮 Enlaces del Proyecto
 
-| Tecla | Instrumento | Color    |
-|-------|-------------|----------|
-| Q     | Hi-Hat      | 🔴 Rojo  |
-| W     | Snare       | 🔵 Azul  |
-| E     | Tom         | 🟢 Verde |
-| R     | Kick        | 🟡 Amarillo |
+- 🚀 **Juego en GitHub Pages:** [https://2026b-sof-jueg-gr1.github.io/rodriguez-sergio-jueg-gr3/](https://2026b-sof-jueg-gr1.github.io/rodriguez-sergio-jueg-gr3/)
+- 📁 **Acceso directo al juego:** [https://2026b-sof-jueg-gr1.github.io/rodriguez-sergio-jueg-gr3/mi-primer-juego/](https://2026b-sof-jueg-gr1.github.io/rodriguez-sergio-jueg-gr3/mi-primer-juego/)
+- 💻 **Repositorio de Código:** [https://github.com/2026B-sof-jueg-gr1/rodriguez-sergio-jueg-gr3](https://github.com/2026B-sof-jueg-gr1/rodriguez-sergio-jueg-gr3)
 
-## ✨ Características
+---
 
-- 🎵 **Generador de niveles por audio**: Sube tu propio archivo MP3/WAV y el juego genera notas automáticamente analizando los beats
-- 🏪 **Tienda de personalización**: Gana monedas y desbloquea colores para la batería, baquetas y ropa del baterista
-- 📈 **Sistema de progresión**: 5+ niveles con dificultad creciente
-- 🎨 **Estética pixel art 8-bits**: Todas las texturas generadas proceduralmente
-- 🎯 **Sistema de precisión**: PERFECT, GREAT, GOOD, OK con multiplicadores de combo
+## 🕹️ Controles (4 Carriles Guitar Hero)
 
-## 🛠️ Tecnologías
+| Tecla | Carril / Instrumento | Color Clásico | Función |
+| :---: | :--- | :---: | :--- |
+| **Q** | Hi-Hat | 🟢 Verde | Golpear / Mantener pulsado |
+| **W** | Snare (Tarola) | 🔴 Rojo | Golpear / Mantener pulsado |
+| **E** | Tom | 🟡 Amarillo | Golpear / Mantener pulsado |
+| **R** | Kick (Bombo) | 🔵 Azul | Golpear / Mantener pulsado |
+| **ESC** | Menú / Pausa | - | Salir al resumen |
 
-- **Phaser 3** (CDN) — Motor de juego
-- **Arcade Physics** — Sistema de colisiones
-- **Web Audio API** — Análisis de frecuencia para generación de niveles
+---
 
-## 📁 Estructura
+## 🔥 Nuevas Mecánicas Avanzadas de Dificultad
 
-```
-mi-primer-juego/
-├── index.html    # Punto de entrada, importa Phaser 3 vía CDN
-└── game.js       # Lógica completa del juego (4 escenas)
-```
+1. **Perspectiva 3D Pixel Art (Carretera Guitar Hero)**:
+   - Carretera de 4 pistas en proyección cónica 3D que viaja desde el horizonte hacia la pantalla.
+   - Las notas (gemas beveled 3D) aumentan de tamaño e intensidad lumínica a medida que se acercan.
+   - Escenario completo con amplificadores Marshall, focos dinámicos y baterista animado.
 
-## 🚀 Ejecutar Localmente
+2. **Línea de Acierto Móvil (Sube y Baja)**:
+   - A partir del Nivel 3, los 4 receptores y la barra de impacto oscilan senoidalmente arriba y abajo, exigiendo máxima precisión y cálculo de timing al jugador.
 
-1. Clona el repositorio
-2. Abre `mi-primer-juego/index.html` con **Live Server** en VS Code
-3. ¡Juega!
+3. **Notas Sostenidas (Hold / Sustain Notes)**:
+   - Rayos láser y estelas de electricidad pixel art que requieren **mantener presionada la tecla** durante la duración del solo para obtener puntos continuos, multiplicador y chispas.
+
+4. **Tablero Rotatorio Dinámico (Vertical ⮀ Horizontal)**:
+   - En niveles avanzados, el tablero realiza transiciones cinemáticas rotando 90 grados entre vista vertical y horizontal con alertas en pantalla.
+
+5. **Pantalla Completa Responsiva (Full Viewport)**:
+   - El juego se expande dinámicamente al 100% de la ventana de cualquier monitor o navegador.
+
+6. **Generador de Niveles por Audio Real**:
+   - Sube cualquier canción (MP3/WAV/OGG) y la Web Audio API detectará picos de ritmo y notas sostenidas automáticamente.
+
+7. **Sintetizador 8-Bit Integrado**:
+   - Sonidos realistas de batería electrónica (bombo, tarola, platillos y tom) sintetizados en tiempo real sin requerir archivos pesados.
+
+8. **Tienda y Personalización**:
+   - Desbloquea colores para la batería, ropa del baterista y baquetas con las monedas ganadas.
+
+---
+
+## 🚀 Cómo Ejecutar Localmente
+
+1. Clona el repositorio:
+   ```bash
+   git clone https://github.com/2026B-sof-jueg-gr1/rodriguez-sergio-jueg-gr3.git
+   ```
+2. Abre la carpeta con VS Code.
+3. Haz clic derecho en `mi-primer-juego/index.html` (o `index.html` en la raíz) y selecciona **Open with Live Server**.

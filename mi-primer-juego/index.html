@@ -2,23 +2,39 @@
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pixel Drums - 8-Bit Rhythm Game</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pixel Drums: Guitar Hero Edition</title>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
     <style>
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
         }
-        body {
+        html, body {
+            width: 100%;
+            height: 100%;
             margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #000000;
+        }
+        #game-container {
+            width: 100vw;
+            height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
-            background: #2d2d2d;
-            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            width: 100vw !important;
+            height: 100vh !important;
+            object-fit: cover;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
         }
         #file-input-container {
             display: none;
@@ -31,6 +47,7 @@
     <div id="file-input-container">
         <input type="file" id="audio-upload" accept="audio/*" />
     </div>
+    <div id="game-container"></div>
     <script src="game.js"></script>
 </body>
 </html>
